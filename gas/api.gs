@@ -4,12 +4,14 @@
 
 /**
  * API Gateway へリクエストを送信する
+ * @param {string} jobId - リクエスト識別用UUID
  * @param {string} action - "add" | "update" | "delete"
- * @param {Object[]} items - 送信するアイテムの配列
+ * @param {Object[]} items - 送信するアイテムの配列（row_number 付き）
  * @returns {Object} APIレスポンスのパース済みオブジェクト
  */
-function callApi(action, items) {
+function callApi(jobId, action, items) {
   var payload = {
+    job_id: jobId,
     action: action,
     items: items
   };

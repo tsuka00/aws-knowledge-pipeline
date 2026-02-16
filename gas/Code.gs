@@ -42,7 +42,7 @@ function syncAdd() {
   );
   if (confirm !== ui.Button.OK) return;
 
-  // No を生成してシートに即座に書き込み
+  // No を生成してシートに即座に書き込み、row_number を付与
   var items = [];
   for (var i = 0; i < targets.length; i++) {
     var row = targets[i];
@@ -50,6 +50,7 @@ function syncAdd() {
     sheet.getRange(row, COL.NO).setValue(no);
 
     items.push({
+      row_number: row,
       no: no,
       question:   String(sheet.getRange(row, COL.QUESTION).getValue()),
       answer:     String(sheet.getRange(row, COL.ANSWER).getValue()),
@@ -58,10 +59,11 @@ function syncAdd() {
     });
   }
 
-  // API 呼び出し
+  // API 呼び出し（job_id を生成）
   try {
-    var response = callApi("add", items);
-    applyResults(sheet, targets, response.results);
+    var jobId = Utilities.getUuid();
+    var response = callApi(jobId, "add", items);
+    applyResults(sheet, response.results);
   } catch (e) {
     markError(sheet, targets, e.message);
   }
@@ -106,6 +108,7 @@ function syncUpdate() {
   for (var i = 0; i < targets.length; i++) {
     var row = targets[i];
     items.push({
+      row_number: row,
       no:         String(sheet.getRange(row, COL.NO).getValue()),
       question:   String(sheet.getRange(row, COL.QUESTION).getValue()),
       answer:     String(sheet.getRange(row, COL.ANSWER).getValue()),
@@ -115,8 +118,9 @@ function syncUpdate() {
   }
 
   try {
-    var response = callApi("update", items);
-    applyResults(sheet, targets, response.results);
+    var jobId = Utilities.getUuid();
+    var response = callApi(jobId, "update", items);
+    applyResults(sheet, response.results);
   } catch (e) {
     markError(sheet, targets, e.message);
   }
@@ -155,13 +159,15 @@ function syncDelete() {
   for (var i = 0; i < targets.length; i++) {
     var row = targets[i];
     items.push({
+      row_number: row,
       no: String(sheet.getRange(row, COL.NO).getValue())
     });
   }
 
   try {
-    var response = callApi("delete", items);
-    applyDeleteResults(sheet, targets, response.results);
+    var jobId = Utilities.getUuid();
+    var response = callApi(jobId, "delete", items);
+    applyDeleteResults(sheet, response.results);
   } catch (e) {
     markError(sheet, targets, e.message);
   }
@@ -174,11 +180,10 @@ function syncDelete() {
 // ---------------------------------------------------------------------------
 
 /**
- * No を生成する (KB-{UUID先頭8桁})
+ * No を生成する (KB-{UUIDv4フル36桁})
  */
 function generateNo() {
-  var uuid = Utilities.getUuid().replace(/-/g, "");
-  return "KB-" + uuid.substring(0, 8);
+  return "KB-" + Utilities.getUuid();
 }
 
 /**
@@ -203,24 +208,20 @@ function getCheckedRows(sheet) {
 
 /**
  * API レスポンスの結果をシートに反映する（追加・更新用）
+ * row_number を使って対応する行を特定する
  */
-function applyResults(sheet, targetRows, results) {
+function applyResults(sheet, results) {
   var COL = CONFIG.COL;
-  var resultMap = {};
+
   for (var i = 0; i < results.length; i++) {
-    resultMap[results[i].no] = results[i];
-  }
+    var result = results[i];
+    var row = result.row_number;
+    if (!row) continue;
 
-  for (var j = 0; j < targetRows.length; j++) {
-    var row = targetRows[j];
-    var no = String(sheet.getRange(row, COL.NO).getValue());
-    var result = resultMap[no];
-
-    if (result && result.status === "success") {
+    if (result.status === "success") {
       sheet.getRange(row, COL.UPDATED_AT).setValue(result.updated_at);
       sheet.getRange(row, COL.STATUS).setValue("同期済");
     } else {
-      var msg = result ? result.message : "Unknown error";
       sheet.getRange(row, COL.STATUS).setValue("エラー");
     }
   }
@@ -228,21 +229,18 @@ function applyResults(sheet, targetRows, results) {
 
 /**
  * API レスポンスの結果をシートに反映する（削除用）
+ * row_number を使って対応する行を特定する
  */
-function applyDeleteResults(sheet, targetRows, results) {
+function applyDeleteResults(sheet, results) {
   var COL = CONFIG.COL;
-  var resultMap = {};
+
   for (var i = 0; i < results.length; i++) {
-    resultMap[results[i].no] = results[i];
-  }
+    var result = results[i];
+    var row = result.row_number;
+    if (!row) continue;
 
-  for (var j = 0; j < targetRows.length; j++) {
-    var row = targetRows[j];
-    var no = String(sheet.getRange(row, COL.NO).getValue());
-    var result = resultMap[no];
-
-    if (result && result.status === "success") {
-      sheet.getRange(row, COL.STATUS).setValue("削除済");
+    if (result.status === "success") {
+      sheet.getRange(row, COL.STATUS).setValue("deleting");
     } else {
       sheet.getRange(row, COL.STATUS).setValue("エラー");
     }
