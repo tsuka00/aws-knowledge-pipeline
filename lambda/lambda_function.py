@@ -27,6 +27,7 @@ def lambda_handler(event, context):
     except json.JSONDecodeError:
         return _response(400, {"error": "Invalid JSON"})
 
+    job_id = body.get("job_id", "")
     action = body.get("action")
     items = body.get("items", [])
 
@@ -41,7 +42,7 @@ def lambda_handler(event, context):
 
     _start_kb_sync()
 
-    return _response(200, {"results": results})
+    return _response(200, {"job_id": job_id, "results": results})
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +53,7 @@ def lambda_handler(event, context):
 def _handle_add(items):
     results = []
     for item in items:
+        row_number = item.get("row_number")
         result = _validate_item(item)
         if result:
             results.append(result)
@@ -59,8 +61,8 @@ def _handle_add(items):
 
         no = item["no"]
         try:
-            md_content = _to_markdown(item["question"], item["answer"])
-            metadata = _build_metadata(item)
+            md_content = _to_markdown(item)
+            metadata = _build_metadata(item, active="true")
 
             s3.put_object(
                 Bucket=S3_BUCKET,
@@ -75,10 +77,10 @@ def _handle_add(items):
                 ContentType="application/json",
             )
 
-            results.append(_success_result(no))
+            results.append(_success_result(no, row_number))
         except Exception as e:
             logger.error("Failed to add %s: %s", no, e)
-            results.append(_error_result(no, str(e)))
+            results.append(_error_result(no, row_number, str(e)))
 
     return results
 
@@ -86,6 +88,7 @@ def _handle_add(items):
 def _handle_update(items):
     results = []
     for item in items:
+        row_number = item.get("row_number")
         result = _validate_item(item)
         if result:
             results.append(result)
@@ -93,8 +96,8 @@ def _handle_update(items):
 
         no = item["no"]
         try:
-            md_content = _to_markdown(item["question"], item["answer"])
-            metadata = _build_metadata(item)
+            md_content = _to_markdown(item)
+            metadata = _build_metadata(item, active="true")
 
             s3.put_object(
                 Bucket=S3_BUCKET,
@@ -109,31 +112,54 @@ def _handle_update(items):
                 ContentType="application/json",
             )
 
-            results.append(_success_result(no))
+            results.append(_success_result(no, row_number))
         except Exception as e:
             logger.error("Failed to update %s: %s", no, e)
-            results.append(_error_result(no, str(e)))
+            results.append(_error_result(no, row_number, str(e)))
 
     return results
 
 
 def _handle_delete(items):
+    """Logical delete: set active to "false" in metadata."""
     results = []
     for item in items:
+        row_number = item.get("row_number")
         no = item.get("no")
         if not no:
-            results.append(_error_result("unknown", "Missing 'no' field"))
+            results.append(_error_result("unknown", row_number, "Missing 'no' field"))
             continue
 
         try:
-            s3.delete_object(Bucket=S3_BUCKET, Key=f"{S3_PREFIX}{no}.md")
-            s3.delete_object(Bucket=S3_BUCKET, Key=f"{S3_PREFIX}{no}.metadata.json")
-            results.append(_success_result(no, message="Deleted"))
+            metadata_key = f"{S3_PREFIX}{no}.metadata.json"
+            existing = _get_existing_metadata(metadata_key)
+            existing["metadataAttributes"]["active"] = "false"
+            existing["metadataAttributes"]["updated_at"] = (
+                datetime.now(JST).isoformat(timespec="seconds")
+            )
+
+            s3.put_object(
+                Bucket=S3_BUCKET,
+                Key=metadata_key,
+                Body=json.dumps(existing, ensure_ascii=False).encode("utf-8"),
+                ContentType="application/json",
+            )
+
+            results.append(_success_result(no, row_number, message="Deleted"))
         except Exception as e:
             logger.error("Failed to delete %s: %s", no, e)
-            results.append(_error_result(no, str(e)))
+            results.append(_error_result(no, row_number, str(e)))
 
     return results
+
+
+def _get_existing_metadata(key):
+    """Fetch existing metadata from S3. Return default if not found."""
+    try:
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
+        return json.loads(obj["Body"].read().decode("utf-8"))
+    except s3.exceptions.NoSuchKey:
+        return {"metadataAttributes": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -141,15 +167,35 @@ def _handle_delete(items):
 # ---------------------------------------------------------------------------
 
 
-def _to_markdown(question, answer):
-    """Convert natural language Q&A to Markdown format.
+def _to_markdown(item):
+    """Convert natural language Q&A to structured Markdown format.
 
-    - Question becomes an H1 heading.
-    - Answer is normalized: collapse excessive blank lines into paragraph breaks.
+    Template:
+        # FAQ
+        ## Question
+        {question}
+        ## Answer
+        {answer}
+        ---
+        no: {no}
+        category: {category}
+        source: {source_url}
     """
-    q = question.strip()
-    a = _normalize_text(answer.strip())
-    return f"# {q}\n\n{a}\n"
+    question = item["question"].strip()
+    answer = _normalize_text(item["answer"].strip())
+    no = item["no"]
+    category = item.get("category", "")
+    source_url = item.get("source_url", "")
+
+    return (
+        f"# FAQ\n\n"
+        f"## Question\n{question}\n\n"
+        f"## Answer\n{answer}\n\n"
+        f"---\n"
+        f"no: {no}\n"
+        f"category: {category}\n"
+        f"source: {source_url}\n"
+    )
 
 
 def _normalize_text(text):
@@ -170,7 +216,7 @@ def _normalize_text(text):
 # ---------------------------------------------------------------------------
 
 
-def _build_metadata(item):
+def _build_metadata(item, active="true"):
     """Build Knowledge Bases S3 metadata file content."""
     now = datetime.now(JST).isoformat(timespec="seconds")
     return {
@@ -179,6 +225,7 @@ def _build_metadata(item):
             "category": item.get("category", ""),
             "source_url": item.get("source_url", ""),
             "updated_at": now,
+            "active": active,
         }
     }
 
@@ -211,23 +258,36 @@ def _start_kb_sync():
 
 def _validate_item(item):
     """Return an error result dict if the item is invalid, else None."""
+    row_number = item.get("row_number")
     no = item.get("no")
     if not no:
-        return _error_result("unknown", "Missing 'no' field")
+        return _error_result("unknown", row_number, "Missing 'no' field")
     if not item.get("question"):
-        return _error_result(no, "Missing 'question' field")
+        return _error_result(no, row_number, "Missing 'question' field")
     if not item.get("answer"):
-        return _error_result(no, "Missing 'answer' field")
+        return _error_result(no, row_number, "Missing 'answer' field")
     return None
 
 
-def _success_result(no, message="Success"):
+def _success_result(no, row_number, message="Success"):
     now = datetime.now(JST).isoformat(timespec="seconds")
-    return {"no": no, "status": "success", "message": message, "updated_at": now}
+    return {
+        "row_number": row_number,
+        "no": no,
+        "status": "success",
+        "message": message,
+        "updated_at": now,
+    }
 
 
-def _error_result(no, message):
-    return {"no": no, "status": "error", "message": message, "updated_at": None}
+def _error_result(no, row_number, message):
+    return {
+        "row_number": row_number,
+        "no": no,
+        "status": "error",
+        "message": message,
+        "updated_at": None,
+    }
 
 
 def _response(status_code, body):
