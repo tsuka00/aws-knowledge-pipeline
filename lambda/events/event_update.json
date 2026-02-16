@@ -1,0 +1,8 @@
+{
+  "body": "{\"action\":\"update\",\"items\":[{\"no\":\"KB-a1b2c3d4\",\"question\":\"有給休暇の申請方法を教えてください\",\"answer\":\"有給休暇を申請するには、社内ポータルの「勤怠管理」メニューから「休暇申請」を選択してください。\\n\\n申請は希望日の3営業日前までに行う必要があります。\\n\\n【変更点】2026年4月より、申請は2営業日前までに短縮されました。上長の承認後、人事部で処理されます。\",\"category\":\"人事\",\"source_url\":\"https://portal.example.com/hr/leave\"}]}",
+  "httpMethod": "POST",
+  "path": "/knowledge",
+  "headers": {
+    "Content-Type": "application/json"
+  }
+}

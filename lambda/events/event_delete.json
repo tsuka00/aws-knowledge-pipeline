@@ -1,0 +1,8 @@
+{
+  "body": "{\"action\":\"delete\",\"items\":[{\"no\":\"KB-a1b2c3d4\"}]}",
+  "httpMethod": "POST",
+  "path": "/knowledge",
+  "headers": {
+    "Content-Type": "application/json"
+  }
+}
