@@ -150,7 +150,7 @@ aws iam attach-role-policy \
   --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 ```
 
-### 3.3 カスタムポリシーの作成・アタッチ
+### 3.3 カスタमポリシーの作成・アタッチ
 
 `lambda-exec-policy.json`:
 
@@ -354,6 +354,7 @@ Knowledge Base はマネジメントコンソールから作成する。
    - `no` (String, Filterable)
    - `source_url` (String)
    - `updated_at` (String)
+   - `active` (String, Filterable) ← **v2 で追加。検索時に `active = "true"` でフィルタリング**
 
 ### 6.2 Knowledge Base ID と Data Source ID の取得
 
@@ -379,7 +380,7 @@ aws lambda update-function-configuration \
 
 ## 7. 動作確認
 
-### curl でのテスト
+### curl でのテスト（v2 形式: job_id + row_number 付き）
 
 ```bash
 curl -X POST \
@@ -387,10 +388,12 @@ curl -X POST \
   -H "Content-Type: application/json" \
   -H "x-api-key: <API_KEY>" \
   -d '{
+    "job_id": "test-job-001",
     "action": "add",
     "items": [
       {
-        "no": "KB-test0001",
+        "row_number": 2,
+        "no": "KB-550e8400-e29b-41d4-a716-446655440000",
         "question": "テスト質問です",
         "answer": "テスト回答です",
         "category": "テスト",
@@ -400,15 +403,51 @@ curl -X POST \
   }'
 ```
 
+### レスポンス例
+
+```json
+{
+  "job_id": "test-job-001",
+  "results": [
+    {
+      "row_number": 2,
+      "no": "KB-550e8400-e29b-41d4-a716-446655440000",
+      "status": "success",
+      "message": "Success",
+      "updated_at": "2026-02-16T12:00:00+09:00"
+    }
+  ]
+}
+```
+
 ### S3 確認
 
 ```bash
 aws s3 ls s3://kp-dev-s3-data/knowledge/
-aws s3 cp s3://kp-dev-s3-data/knowledge/KB-test0001.md -
-aws s3 cp s3://kp-dev-s3-data/knowledge/KB-test0001.metadata.json -
+aws s3 cp s3://kp-dev-s3-data/knowledge/KB-550e8400-e29b-41d4-a716-446655440000.md -
+aws s3 cp s3://kp-dev-s3-data/knowledge/KB-550e8400-e29b-41d4-a716-446655440000.metadata.json -
 ```
 
-### クリーンアップ（テストデータ削除）
+### メタデータ確認（active フィールドの確認）
+
+```bash
+aws s3 cp s3://kp-dev-s3-data/knowledge/KB-550e8400-e29b-41d4-a716-446655440000.metadata.json - | python3 -m json.tool
+```
+
+期待される出力:
+```json
+{
+  "metadataAttributes": {
+    "no": "KB-550e8400-e29b-41d4-a716-446655440000",
+    "category": "テスト",
+    "source_url": "",
+    "updated_at": "2026-02-16T12:00:00+09:00",
+    "active": "true"
+  }
+}
+```
+
+### 削除テスト（論理削除の確認）
 
 ```bash
 curl -X POST \
@@ -416,7 +455,21 @@ curl -X POST \
   -H "Content-Type: application/json" \
   -H "x-api-key: <API_KEY>" \
   -d '{
+    "job_id": "test-job-002",
     "action": "delete",
-    "items": [{"no": "KB-test0001"}]
+    "items": [{"row_number": 2, "no": "KB-550e8400-e29b-41d4-a716-446655440000"}]
   }'
+```
+
+削除後にメタデータを確認し、`active` が `"false"` になっていることを確認:
+
+```bash
+aws s3 cp s3://kp-dev-s3-data/knowledge/KB-550e8400-e29b-41d4-a716-446655440000.metadata.json - | python3 -m json.tool
+```
+
+### クリーンアップ（テストデータ物理削除）
+
+```bash
+aws s3 rm s3://kp-dev-s3-data/knowledge/KB-550e8400-e29b-41d4-a716-446655440000.md
+aws s3 rm s3://kp-dev-s3-data/knowledge/KB-550e8400-e29b-41d4-a716-446655440000.metadata.json
 ```
