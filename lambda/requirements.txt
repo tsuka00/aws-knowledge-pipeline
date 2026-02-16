@@ -1,0 +1,2 @@
+# boto3 is included in the Lambda Python 3.12 runtime.
+# Add dependencies here only if needed beyond the standard runtime.
