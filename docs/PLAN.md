@@ -1,8 +1,16 @@
-# ナレッジパイプライン設計書
+# ナレッジパイプライン設計書（v2 — フィードバック反映版）
 
 ## Context
 LayerXの事例を参考に、スプレッドシートをUIとした社内ナレッジ(FAQ)管理パイプラインを構築する。
 ビジネスサイドがスプレッドシート上で自然言語で Q&A を管理し、GAS → API Gateway → Lambda の流れで Lambda 側で Markdown に変換・統一してから S3 に格納、Knowledge Bases でベクトル化・検索可能にする。
+
+### v2 での主な変更点（フィードバック反映）
+1. No 形式を `KB-{UUID8桁}` → `KB-{UUIDv4フル36桁}` に変更（衝突リスク排除）
+2. API に `job_id` + `items[].row_number` を追加（書き戻しの安全性確保）
+3. Markdown テンプレートを `## Question` / `## Answer` の構造化形式に変更
+4. `.metadata.json` のスキーマを明示的に定義（キー名・型・制約）
+5. 削除ステータスを `deleting` → `deleted` の2段階管理に変更
+6. 将来改善パス（ingestion分離、追加メニュー分離、認証強化）を明記
 
 ## 命名規則
 
@@ -30,11 +38,11 @@ LayerXの事例を参考に、スプレッドシートをUIとした社内ナレ
 ```
 スプレッドシート (UI) ← ビジネスサイドが自然言語で入力
     ↓ カスタムメニュー操作
-GAS (Google Apps Script) ← No自動生成、バリデーション
-    ↓ HTTP POST (JSON / 自然言語のまま)
+GAS (Google Apps Script) ← No自動生成(UUIDv4フル)、バリデーション
+    ↓ HTTP POST (JSON / job_id + row_number 付き)
 API Gateway (kp-{env}-apigw-knowledge / APIキー認証)
     ↓
-Lambda (kp-{env}-lambda-handler / Python 3.12) ← 自然言語 → Markdown 変換
+Lambda (kp-{env}-lambda-handler / Python 3.12) ← 自然言語 → Markdown 変換（構造化テンプレ）
     ↓
 S3 (kp-{env}-s3-data) → Knowledge Bases (kp-{env}-kb-faq) → S3 Vectors (kp-{env}-s3vectors-faq)
 ```
@@ -44,27 +52,40 @@ S3 (kp-{env}-s3-data) → Knowledge Bases (kp-{env}-kb-faq) → S3 Vectors (kp-{
 | 列 | 内容 | 備考 |
 |----|------|------|
 | A  | チェックボックス | 操作対象の行を選択 |
-| B  | No | `KB-{UUID8桁}` 形式。GAS側で生成。列はシート保護 |
+| B  | No | `KB-{UUIDv4}` 形式（例: `KB-550e8400-e29b-41d4-a716-446655440000`）。GAS側で生成。列はシート保護 |
 | C  | 質問 | **自然言語**（ビジネスサイドが入力） |
 | D  | 回答 | **自然言語**（ビジネスサイドが入力） |
 | E  | カテゴリ | メタデータフィルタリング用 |
 | F  | 参照URL | ソース元URL |
 | G  | 更新日 | 最終同期日時（自動セット） |
-| H  | ステータス | 同期状態: 未同期 / 同期済 / エラー |
+| H  | ステータス | 同期状態: 未同期 / 同期済 / deleting / deleted / エラー |
 
 - 1行目はヘッダー行
 - B列（No）はシート保護（GUI操作）で手動編集不可にする
 - C列・D列は自然言語で入力。Markdown変換はLambda側で行う
 
+### ステータス遷移
+
+```
+(新規入力) → 未同期
+未同期 → [追加成功] → 同期済
+未同期 → [追加失敗] → エラー
+同期済 → [差分更新成功] → 同期済（更新日が更新）
+同期済 → [差分更新失敗] → エラー
+同期済 → [削除実行] → deleting
+deleting → [ingestion完了確認] → deleted
+エラー → [再同期成功] → 同期済
+```
+
 ## 2. GAS (Google Apps Script)
 
 ### No 自動生成ロジック（事故防止設計）
-- 形式: `KB-{UUID先頭8桁}` (例: `KB-a1b2c3d4`)
-- `Utilities.getUuid()` で UUID を生成し、先頭8桁を使用
+- 形式: `KB-{UUIDv4}` (例: `KB-550e8400-e29b-41d4-a716-446655440000`)
+- `Utilities.getUuid()` で UUIDv4 を生成し、**フルの36桁をそのまま使用**（衝突リスク排除）
 - **追加時のみ** No を生成。以下のガードを入れる:
   - B列（No）に値がある行は追加対象から除外（二重生成防止）
   - 追加前に確認ダイアログを表示（`ui.alert`で対象行数を表示）
-  - 生成した No は即座にシートに書き込み、API呼び出し失敗時もNoは維持（S3側にはまだ存在しないのでステータスを「エラー」にする）
+  - 生成した No は即座にシートに書き込み、API呼び出し失敗時もNoは維持（ステータスを「エラー」にする）
 - **差分更新/削除**: B列に No がない行はスキップ（警告表示）
 
 ### カスタムメニュー
@@ -79,24 +100,29 @@ S3 (kp-{env}-s3-data) → Knowledge Bases (kp-{env}-kb-faq) → S3 Vectors (kp-{
 ### 処理フロー（追加の場合）
 1. チェックボックスが ON かつ No が空の行を収集
 2. 対象行数を確認ダイアログで表示 → キャンセル可
-3. 各行に `KB-{UUID8桁}` を生成しB列に即座に書き込み
-4. 行データ（自然言語のまま）を JSON に変換し API Gateway へ POST
-5. レスポンスを元に更新日 / ステータスを更新
-6. 処理後、チェックボックスを OFF に戻す
+3. 各行に `KB-{UUIDv4}` を生成しB列に即座に書き込み
+4. `job_id`（UUID）を生成し、各行データに `row_number` を付与
+5. JSON に変換し API Gateway へ POST
+6. レスポンスの `row_number` を使って対応する行の更新日 / ステータスを更新
+7. 処理後、チェックボックスを OFF に戻す
 
 ### 処理フロー（差分更新の場合）
 1. チェックボックスが ON かつ No がある行を収集
 2. 対象行数を確認ダイアログで表示 → キャンセル可
-3. 行データ（自然言語のまま）を JSON に変換し API Gateway へ POST
-4. レスポンスを元に更新日 / ステータスを更新
-5. 処理後、チェックボックスを OFF に戻す
+3. `job_id` を生成し、各行データに `row_number` を付与
+4. JSON に変換し API Gateway へ POST
+5. レスポンスの `row_number` を使って対応する行の更新日 / ステータスを更新
+6. 処理後、チェックボックスを OFF に戻す
 
 ### 処理フロー（削除の場合）
 1. チェックボックスが ON かつ No がある行を収集
 2. 対象行数を確認ダイアログで表示（削除は特に注意喚起）→ キャンセル可
-3. API Gateway へ DELETE リクエスト POST
-4. 成功した行のステータスを「削除済」に更新、No はそのまま残す（履歴として）
-5. 処理後、チェックボックスを OFF に戻す
+3. `job_id` を生成し、各行データに `row_number` を付与
+4. API Gateway へ POST
+5. 成功した行のステータスを `deleting` に更新、No はそのまま残す
+6. 処理後、チェックボックスを OFF に戻す
+
+※ `deleting` → `deleted` の遷移は、ingestion完了後に手動確認 or 将来的に自動化
 
 ### ファイル構成
 ```
@@ -108,29 +134,67 @@ gas/
 
 ## 3. Lambda (Python)
 
-### Markdown 変換ロジック
-GAS から自然言語で受け取った質問・回答を Lambda 側で Markdown に変換・統一する。
-フォーマットの違いによるノイズを排除し、安定した検索性能を実現する。
+### Markdown 変換ロジック（構造化テンプレート）
+GAS から自然言語で受け取った質問・回答を Lambda 側で **構造化された Markdown テンプレート** に変換・統一する。
+`# 質問` だけの単純なH1形式だと、検索時に質問文が過度に重み付けされたり、同一質問が増えた際に見出しが汚れる問題がある。
+`## Question` / `## Answer` のセクション分けにより、質問と回答を均等に検索対象にできる。
 
-変換ルール:
-- 質問 → `# {質問文}` (H1見出し)
-- 回答 → 本文として整形（改行の正規化、段落分け）
-- カテゴリ → メタデータファイルに格納
-- 参照URL → メタデータファイルに格納
+#### テンプレート
+```markdown
+# FAQ
+
+## Question
+{question}
+
+## Answer
+{answer}
+
+---
+no: {no}
+category: {category}
+source: {source_url}
+```
+
+#### 変換例
+入力:
+- 質問: `有給休暇の申請方法を教えてください`
+- 回答: `社内ポータルの「勤怠管理」メニューから「休暇申請」を選択してください。申請は希望日の3営業日前までに行う必要があります。`
+
+出力:
+```markdown
+# FAQ
+
+## Question
+有給休暇の申請方法を教えてください
+
+## Answer
+社内ポータルの「勤怠管理」メニューから「休暇申請」を選択してください。
+
+申請は希望日の3営業日前までに行う必要があります。
+
+---
+no: KB-550e8400-e29b-41d4-a716-446655440000
+category: 人事
+source: https://...
+```
+
+※ 回答テキストの正規化（改行コード統一、連続空行の圧縮、行末空白除去）も行う
 
 ### エンドポイント設計（単一Lambda、action パラメータで分岐）
 
 ```json
 POST /knowledge
 {
+  "job_id": "uuid-for-this-request",
   "action": "add" | "update" | "delete",
   "items": [
     {
-      "no": "KB-a1b2c3d4",
+      "row_number": 2,
+      "no": "KB-550e8400-e29b-41d4-a716-446655440000",
       "question": "自然言語の質問文",
       "answer": "自然言語の回答文",
-      "category": "...",
-      "source_url": "..."
+      "category": "カテゴリ名",
+      "source_url": "https://..."
     }
   ]
 }
@@ -139,9 +203,11 @@ POST /knowledge
 ### レスポンス
 ```json
 {
+  "job_id": "uuid-for-this-request",
   "results": [
     {
-      "no": "KB-a1b2c3d4",
+      "row_number": 2,
+      "no": "KB-550e8400-e29b-41d4-a716-446655440000",
       "status": "success" | "error",
       "message": "...",
       "updated_at": "2026-02-16T12:00:00+09:00"
@@ -154,40 +220,43 @@ POST /knowledge
 ```
 s3://kp-{env}-s3-data/
 └── knowledge/
-    ├── KB-a1b2c3d4.md              # Markdown変換済みナレッジ本文
-    ├── KB-a1b2c3d4.metadata.json   # メタデータ
-    ├── KB-e5f6g7h8.md
-    ├── KB-e5f6g7h8.metadata.json
+    ├── KB-550e8400-e29b-41d4-a716-446655440000.md
+    ├── KB-550e8400-e29b-41d4-a716-446655440000.metadata.json
     └── ...
 ```
 
-### Markdown ファイル形式 (例: `KB-a1b2c3d4.md`)
-Lambda が自然言語から変換して生成:
-```markdown
-# 有給休暇の申請方法を教えてください
+### `.metadata.json` スキーマ定義
 
-有給休暇を申請するには、社内ポータルの「勤怠管理」メニューから「休暇申請」を選択してください。
+| キー | 型 | 必須 | 説明 | 例 |
+|------|----|----|------|-----|
+| `no` | string | Yes | ナレッジID（`KB-{UUIDv4}`） | `"KB-550e8400-..."` |
+| `category` | string | Yes | カテゴリ名（検索フィルタ用） | `"人事"` |
+| `source_url` | string | No | ソース元URL | `"https://..."` |
+| `updated_at` | string | Yes | ISO 8601 形式の更新日時 | `"2026-02-16T12:00:00+09:00"` |
+| `active` | string | Yes | 論理削除フラグ。`"true"` / `"false"` | `"true"` |
 
-申請は希望日の3営業日前までに行う必要があります。上長の承認後、人事部で処理されます。
-```
+**注意事項:**
+- `metadataAttributes` の直下にフラットなキーバリューで配置（ネスト不可）
+- Knowledge Bases のメタデータフィルタリングでサポートされる型は `string`、`number`、`boolean`（文字列として格納）
+- `id` 等の予約語的なキー名は避ける
+- `active` フィールドで論理削除を実現。検索時に `active = "true"` でフィルタリング
 
-### メタデータファイル形式 (例: `KB-a1b2c3d4.metadata.json`)
 ```json
 {
   "metadataAttributes": {
-    "no": "KB-a1b2c3d4",
+    "no": "KB-550e8400-e29b-41d4-a716-446655440000",
     "category": "人事",
     "source_url": "https://...",
-    "updated_at": "2026-02-16T12:00:00+09:00"
+    "updated_at": "2026-02-16T12:00:00+09:00",
+    "active": "true"
   }
 }
 ```
-※ Knowledge Bases の S3 メタデータフィルタリング規約に準拠
 
 ### 処理概要
-- **add**: 自然言語→Markdown変換 → `.md` と `.metadata.json` を S3 に PUT → KB 同期開始
-- **update**: 自然言語→Markdown変換 → 既存ファイルを上書き → KB 同期開始
-- **delete**: `.md` と `.metadata.json` を S3 から DELETE → KB 同期開始
+- **add**: 自然言語→構造化Markdown変換 → `.md`（`active: "true"`）と `.metadata.json` を S3 に PUT → KB 同期開始
+- **update**: 自然言語→構造化Markdown変換 → 既存ファイルを上書き → KB 同期開始
+- **delete**: `.metadata.json` の `active` を `"false"` に更新（論理削除）→ KB 同期開始。S3 からファイル自体は削除しない
 - KB 同期: `bedrock_agent.start_ingestion_job()` を呼び出し（バッチで1回のみ）
 
 ### ファイル構成
@@ -297,3 +366,31 @@ Lambda が S3 / Bedrock にアクセスするためのロール。
 2. AWS にデプロイ後、API Gateway 経由で curl テスト
 3. スプレッドシートからカスタムメニューで E2E テスト
 4. Knowledge Bases で検索クエリを実行し、結果を確認
+5. 削除後に `deleting` → `deleted` のステータス遷移を確認
+6. メタデータフィルタリング（`active = "true"` + `category` フィルタ）の検証
+
+## 7. 将来改善パス
+
+### Phase 2: ingestion job の分離
+現状は Lambda 内で `start_ingestion_job()` を同期的に呼んでいるが、更新件数が増えると以下の問題が発生する:
+- Lambda のタイムアウトリスク
+- 短時間に複数回 ingestion が走る無駄
+
+**改善案:**
+- Lambda A（S3書き込み）→ SQS / EventBridge → Lambda B（ingestion起動）の分離
+- DynamoDB で `last_started_at` を管理し、デバウンス（一定間隔以内の重複起動を防止）
+
+### Phase 3: 追加メニューの分離（採番と同期の分離）
+現状の「追加」は No 採番 + API 呼び出しを一気に行う。途中失敗で「No だけ発番済み」が残るリスクがある。
+
+**改善案:**
+- 追加 = No 採番のみ（ローカル操作）
+- 同期（差分更新）で初回も含めて upsert
+- 操作が単純になり、失敗時の再実行も楽
+
+### Phase 4: 認証強化
+現状は API キーのみ。漏洩時のリスクが高い。
+
+**改善案:**
+- Google ID token + Lambda Authorizer（GAS から Google の ID トークンを取得し、Lambda Authorizer で検証）
+- IP 制限は GAS 経由では IP 固定が難しいため注意が必要
