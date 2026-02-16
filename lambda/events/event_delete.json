@@ -1,5 +1,5 @@
 {
-  "body": "{\"action\":\"delete\",\"items\":[{\"no\":\"KB-a1b2c3d4\"}]}",
+  "body": "{\"job_id\":\"deadbeef-1234-5678-9abc-def012345678\",\"action\":\"delete\",\"items\":[{\"row_number\":2,\"no\":\"KB-550e8400-e29b-41d4-a716-446655440000\"}]}",
   "httpMethod": "POST",
   "path": "/knowledge",
   "headers": {
