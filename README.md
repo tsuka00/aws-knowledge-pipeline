@@ -61,14 +61,7 @@ S3 (kp-{env}-s3-data) → Knowledge Bases (kp-{env}-kb-faq) → S3 Vectors (kp-{
 | IAM ロール (Lambda) | `kp-{env}-iam-lambda-exec` | Lambda 実行ロール |
 | IAM ロール (KB) | `kp-{env}-iam-kb-exec` | Knowledge Base 実行ロール |
 
-### dev 環境の実リソース ID
 
-| リソース | ID / ARN |
-|----------|----------|
-| API Gateway | `w6mmssb4jl` |
-| Knowledge Base | `XKAQUQ91SM` |
-| Data Source | `0B2RFUVWUR` |
-| API エンドポイント | `https://w6mmssb4jl.execute-api.ap-northeast-1.amazonaws.com/prod/knowledge` |
 
 詳細な構築手順は [docs/aws-setup.md](docs/aws-setup.md) を参照。
 
